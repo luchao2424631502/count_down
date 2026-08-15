@@ -1,54 +1,36 @@
 /**
- * routes/countdowns.ts — 倒计时条目 CRUD 路由骨架
+ * routes/countdowns.ts — 倒计时条目 CRUD 路由（与前端 web/src/api 契约对齐）
  *
- * - GET    /api/countdowns        列出（is_deleted=0，置顶/排序优先）
- * - GET    /api/countdowns/:id    单条
- * - POST   /api/countdowns        新建
- * - PUT    /api/countdowns/:id    更新（含 updated_at 刷新）
- * - DELETE /api/countdowns/:id    软删除（is_deleted=1）
+ * 端点：
+ *   GET    /api/countdowns        拉全量（含软删标记，供前端 LWW 合并）+ 重复推进后返回
+ *   GET    /api/countdowns/:id    单条（含软删）
+ *   POST   /api/countdowns        新建（id 客户端 UUID，created_at/updated_at 服务端补），返回完整行
+ *   PUT    /api/countdowns/:id    更新（刷新 updated_at，LWW 时间戳由客户端经 body 或服务端生成），返回完整行
+ *   DELETE /api/countdowns/:id    软删除（is_deleted=1，updated_at 刷新），返回完整行
+ *
+ * 说明：
+ *   · GET / 返回「含软删」全量——前端 refresh() 按 updated_at 做 LWW 合并，
+ *     必须能看到服务端软删记录才能正确双向合并。
+ *   · 写接口统一经 repo（tags 清洗、默认值、完整行返回）。
  */
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
-import db from '../db.js';
-
-interface CountdownRow {
-  id: string;
-  title: string;
-  note: string | null;
-  target_date: string;
-  direction: number;
-  category_id: string | null;
-  tags: string | null;
-  repeat_type: string | null;
-  repeat_interval: number;
-  repeat_end: string | null;
-  pinned: number;
-  sort_order: number;
-  remind_days: string | null;
-  last_notified: string | null;
-  notify_channel: string;
-  is_deleted: number;
-  updated_at: string;
-  created_at: string;
-}
+import * as repo from '../repo.js';
+import { advanceAllDue } from '../advance.js';
 
 export const router = Router();
 
-// GET / —— 列出未删除条目
+// GET / —— 全量（含软删）+ 重复事件到期自动推进
 router.get('/', (_req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT * FROM countdowns
-       WHERE is_deleted = 0
-       ORDER BY pinned DESC, sort_order ASC, created_at DESC`
-    )
-    .all() as CountdownRow[];
+  // 后端侧重复推进：先把过期重复事件累进到下一次（持久化），再返回合并后的全量
+  advanceAllDue();
+  const rows = repo.getAllCountdowns(); // 含软删，供前端 LWW 合并
   res.json(rows);
 });
 
-// GET /:id —— 单条
+// GET /:id —— 单条（含软删返回）
 router.get('/:id', (req, res) => {
-  const row = db.prepare(`SELECT * FROM countdowns WHERE id = ? AND is_deleted = 0`).get(req.params.id);
+  const row = repo.getCountdownById(req.params.id);
   if (!row) {
     res.status(404).json({ error: 'Not Found' });
     return;
@@ -58,104 +40,50 @@ router.get('/:id', (req, res) => {
 
 // POST / —— 新建
 router.post('/', (req, res) => {
-  const now = new Date().toISOString();
-  const {
-    id = randomUUID(),
-    title,
-    note = null,
-    target_date,
-    direction = 1,
-    category_id = null,
-    tags = null,
-    repeat_type = null,
-    repeat_interval = 1,
-    repeat_end = null,
-    pinned = 0,
-    sort_order = 0,
-    remind_days = null,
-    last_notified = null,
-    notify_channel = 'app',
-  } = req.body ?? {};
-
-  if (!title || !target_date) {
-    res.status(400).json({ error: 'title 与 target_date 必填' });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const cols = repo.pickCountdownCols(body);
+  // 校验必填
+  if (!cols.title) {
+    res.status(400).json({ error: 'title 必填' });
+    return;
+  }
+  if (!cols.target_date) {
+    res.status(400).json({ error: 'target_date 必填' });
     return;
   }
 
-  const stmt = db.prepare(
-    `INSERT INTO countdowns
-     (id, title, note, target_date, direction, category_id, tags,
-      repeat_type, repeat_interval, repeat_end, pinned, sort_order,
-      remind_days, last_notified, notify_channel, is_deleted, updated_at, created_at)
-     VALUES
-     (@id, @title, @note, @target_date, @direction, @category_id, @tags,
-      @repeat_type, @repeat_interval, @repeat_end, @pinned, @sort_order,
-      @remind_days, @last_notified, @notify_channel, 0, @updated_at, @created_at)`
-  );
-  stmt.run({
-    id, title, note, target_date, direction, category_id, tags,
-    repeat_type, repeat_interval, repeat_end, pinned, sort_order,
-    remind_days, last_notified, notify_channel,
-    updated_at: now, created_at: now,
-  });
-
-  res.status(201).json({ id, updated_at: now });
+  const clientId = typeof body.id === 'string' && body.id ? body.id : randomUUID();
+  const clientUpdatedAt =
+    typeof body.updated_at === 'string' && body.updated_at ? body.updated_at : undefined;
+  const row = repo.createCountdown(cols, { id: clientId, updated_at: clientUpdatedAt });
+  res.status(201).json(row);
 });
 
-// PUT /:id —— 更新
+// PUT /:id —— 更新（返回完整行；updated_at 优先用客户端传入的，否则服务端生成）
 router.put('/:id', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM countdowns WHERE id = ? AND is_deleted = 0`).get(req.params.id) as
-    | CountdownRow
-    | undefined;
+  const existing = repo.getCountdownById(req.params.id);
   if (!existing) {
     res.status(404).json({ error: 'Not Found' });
     return;
   }
-
-  const now = new Date().toISOString();
-  const body = req.body ?? {};
-  const merged: Record<string, unknown> = {
-    title: body.title ?? existing.title,
-    note: body.note ?? existing.note,
-    target_date: body.target_date ?? existing.target_date,
-    direction: body.direction ?? existing.direction,
-    category_id: body.category_id ?? existing.category_id,
-    tags: body.tags ?? existing.tags,
-    repeat_type: body.repeat_type ?? existing.repeat_type,
-    repeat_interval: body.repeat_interval ?? existing.repeat_interval,
-    repeat_end: body.repeat_end ?? existing.repeat_end,
-    pinned: body.pinned ?? existing.pinned,
-    sort_order: body.sort_order ?? existing.sort_order,
-    remind_days: body.remind_days ?? existing.remind_days,
-    last_notified: body.last_notified ?? existing.last_notified,
-    notify_channel: body.notify_channel ?? existing.notify_channel,
-  };
-
-  db.prepare(
-    `UPDATE countdowns SET
-       title=@title, note=@note, target_date=@target_date, direction=@direction,
-       category_id=@category_id, tags=@tags, repeat_type=@repeat_type,
-       repeat_interval=@repeat_interval, repeat_end=@repeat_end, pinned=@pinned,
-       sort_order=@sort_order, remind_days=@remind_days, last_notified=@last_notified,
-       notify_channel=@notify_channel, updated_at=@updated_at
-     WHERE id=@id`
-  ).run({ id: existing.id, ...merged, updated_at: now });
-
-  res.json({ id: existing.id, updated_at: now });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const cols = repo.pickCountdownCols(body);
+  const updatedAt =
+    typeof body.updated_at === 'string' && body.updated_at ? body.updated_at : new Date().toISOString();
+  const row = repo.updateCountdown(existing, cols, updatedAt);
+  res.json(row);
 });
 
 // DELETE /:id —— 软删除
 router.delete('/:id', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM countdowns WHERE id = ?`).get(req.params.id) as
-    | CountdownRow
-    | undefined;
+  const existing = repo.getCountdownById(req.params.id);
   if (!existing) {
     res.status(404).json({ error: 'Not Found' });
     return;
   }
-  const now = new Date().toISOString();
-  db.prepare(`UPDATE countdowns SET is_deleted = 1, updated_at = ? WHERE id = ?`).run(now, req.params.id);
-  res.json({ id: existing.id, is_deleted: 1, updated_at: now });
+  const updatedAt = new Date().toISOString();
+  const row = repo.softDeleteCountdown(existing, updatedAt);
+  res.json(row);
 });
 
 export default router;

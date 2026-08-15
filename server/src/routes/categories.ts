@@ -1,41 +1,27 @@
 /**
- * routes/categories.ts — 分类 CRUD 路由骨架
+ * routes/categories.ts — 分类 CRUD 路由（与前端 web/src/api 契约对齐）
  *
- * - GET    /api/categories     列出（is_deleted=0）
- * - GET    /api/categories/:id 单条
- * - POST   /api/categories     新建
- * - PUT    /api/categories/:id 更新
- * - DELETE /api/categories/:id 软删除（is_deleted=1）
+ * 端点：
+ *   GET    /api/categories        全量（含软删，供前端 LWW 合并）
+ *   GET    /api/categories/:id    单条（含软删）
+ *   POST   /api/categories        新建（id 客户端 UUID，服务端补时间戳），返回完整行
+ *   PUT    /api/categories/:id    更新（刷新 updated_at，优先用客户端传入），返回完整行
+ *   DELETE /api/categories/:id    软删除（is_deleted=1），返回完整行
  */
 import { Router } from 'express';
 import { randomUUID } from 'crypto';
-import db from '../db.js';
-
-interface CategoryRow {
-  id: string;
-  name: string;
-  color: string | null;
-  sort_order: number;
-  is_deleted: number;
-  updated_at: string;
-  created_at: string;
-}
+import * as repo from '../repo.js';
 
 export const router = Router();
 
-// GET / —— 列出未删除分类
+// GET / —— 全量（含软删）
 router.get('/', (_req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT * FROM categories WHERE is_deleted = 0 ORDER BY sort_order ASC, created_at ASC`
-    )
-    .all() as CategoryRow[];
-  res.json(rows);
+  res.json(repo.getAllCategories());
 });
 
 // GET /:id
 router.get('/:id', (req, res) => {
-  const row = db.prepare(`SELECT * FROM categories WHERE id = ? AND is_deleted = 0`).get(req.params.id);
+  const row = repo.getCategoryById(req.params.id);
   if (!row) {
     res.status(404).json({ error: 'Not Found' });
     return;
@@ -45,54 +31,56 @@ router.get('/:id', (req, res) => {
 
 // POST /
 router.post('/', (req, res) => {
-  const now = new Date().toISOString();
-  const { id = randomUUID(), name, color = null, sort_order = 0 } = req.body ?? {};
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
   if (!name) {
     res.status(400).json({ error: 'name 必填' });
     return;
   }
-  db.prepare(
-    `INSERT INTO categories (id, name, color, sort_order, is_deleted, updated_at, created_at)
-     VALUES (@id, @name, @color, @sort_order, 0, @updated_at, @created_at)`
-  ).run({ id, name, color, sort_order, updated_at: now, created_at: now });
-  res.status(201).json({ id, updated_at: now });
+  const clientId = typeof body.id === 'string' && body.id ? body.id : randomUUID();
+  const row = repo.createCategory(
+    {
+      name,
+      color: body.color == null ? null : String(body.color),
+      sort_order: Math.floor(Number(body.sort_order) || 0),
+    },
+    { id: clientId },
+  );
+  res.status(201).json(row);
 });
 
 // PUT /:id
 router.put('/:id', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM categories WHERE id = ? AND is_deleted = 0`).get(req.params.id) as
-    | CategoryRow
-    | undefined;
+  const existing = repo.getCategoryById(req.params.id);
   if (!existing) {
     res.status(404).json({ error: 'Not Found' });
     return;
   }
-  const now = new Date().toISOString();
-  const body = req.body ?? {};
-  db.prepare(
-    `UPDATE categories SET name=@name, color=@color, sort_order=@sort_order, updated_at=@updated_at WHERE id=@id`
-  ).run({
-    id: existing.id,
-    name: body.name ?? existing.name,
-    color: body.color ?? existing.color,
-    sort_order: body.sort_order ?? existing.sort_order,
-    updated_at: now,
-  });
-  res.json({ id: existing.id, updated_at: now });
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const updatedAt =
+    typeof body.updated_at === 'string' && body.updated_at ? body.updated_at : new Date().toISOString();
+  const row = repo.updateCategory(
+    existing,
+    {
+      name: typeof body.name === 'string' && body.name ? String(body.name).trim() : undefined,
+      color: body.color !== undefined ? (body.color == null ? null : String(body.color)) : undefined,
+      sort_order: body.sort_order != null ? Math.floor(Number(body.sort_order) || 0) : undefined,
+    },
+    updatedAt,
+  );
+  res.json(row);
 });
 
 // DELETE /:id —— 软删除
 router.delete('/:id', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM categories WHERE id = ?`).get(req.params.id) as
-    | CategoryRow
-    | undefined;
+  const existing = repo.getCategoryById(req.params.id);
   if (!existing) {
     res.status(404).json({ error: 'Not Found' });
     return;
   }
-  const now = new Date().toISOString();
-  db.prepare(`UPDATE categories SET is_deleted = 1, updated_at = ? WHERE id = ?`).run(now, req.params.id);
-  res.json({ id: existing.id, is_deleted: 1, updated_at: now });
+  const updatedAt = new Date().toISOString();
+  const row = repo.softDeleteCategory(existing, updatedAt);
+  res.json(row);
 });
 
 export default router;
