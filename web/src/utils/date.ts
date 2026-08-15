@@ -170,16 +170,21 @@ export function nextTriggerDate(
   }
   let current = targetDate;
   const anchorDay = parseInt(targetDate.split('-')[2], 10);
+  // 起始触发日已超出 repeat_end → 重复已终止，不再有下一次触发日（Bug4：边界在推进前先判）
+  if (repeatEnd && isValidDateStr(repeatEnd) && current > repeatEnd) {
+    return null;
+  }
   // 防止死循环：限制推进次数（比如 10000 次，超出视为异常返回 null）
   for (let i = 0; i < 10000; i++) {
     if (daysUntil(current, todayStr) >= 0) break; // current >= today
     const next = advanceRepeat(current, repeatType, interval, anchorDay);
     if (next === current) break; // 无推进
+    // Bug4 修复：每次推进后立刻判断是否已达/超出 repeat_end，
+    // 已终止则直接返回 null（避免继续空转计算，且边界语义正确）。
+    if (repeatEnd && isValidDateStr(repeatEnd) && next > repeatEnd) {
+      return null;
+    }
     current = next;
-  }
-  // 若推进后的日期已经超出重复终止日（且终止日存在），则终止
-  if (repeatEnd && isValidDateStr(repeatEnd) && current > repeatEnd) {
-    return null;
   }
   return current;
 }
@@ -200,16 +205,28 @@ export function parseRemindDays(remindDays?: string | null): number[] {
 }
 
 /**
- * 提醒判定：给定 target_date（触发日）、remind_days、today，
+ * 提醒判定：给定 target_date（触发日）、remind_days、today、last_notified（可选），
  * 返回今天应触发的提醒天数列表（提前 N 天）。
+ *
  * 判定规则：对每个 N，若 目标日 - N 天 == 今天，则触发。
+ *
+ * 去重（Bug2 / §5.2）：last_notified 为 YYYY-MM-DD 日期粒度，记录「今天这个触发日
+ * 是否已提醒」。若 last_notified === 今天（本次触发日已提醒过），则直接返回 []，
+ * 避免重复推送。
+ *
+ * 方向（Bug6）：本函数对 direction 透明——不区分倒数(1)/正数(-1)，两者都能正常
+ * 触发；纪念日/已过事件（direction=-1）同样返回应提醒项，排除逻辑由调用方负责，
+ * 不能在此处按 direction 过滤（否则方向=-1 的条目永不提醒）。
  */
 export function dueReminders(
   targetDate: string,
   remindDays?: string | null,
   today?: string,
+  alreadyNotified?: string | null,
 ): Reminder[] {
   const todayStr = today ?? formatDate(new Date());
+  // 去重：今天这个触发日已提醒过 → 重复推送防护
+  if (alreadyNotified && alreadyNotified === todayStr) return [];
   const days = parseRemindDays(remindDays);
   if (days.length === 0 || !isValidDateStr(targetDate)) return [];
   return days

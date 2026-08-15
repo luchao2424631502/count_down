@@ -69,7 +69,8 @@ export default function DetailPage() {
   const raw = cur ? daysUntil(cur.target_date) : 0;
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  const due = cur ? dueReminders(cur.target_date, cur.remind_days, todayStr) : [];
+  // Bug2：UI 预览同样按 last_notified 去重，避免今日已提醒仍反复展示。
+  const due = cur ? dueReminders(cur.target_date, cur.remind_days, todayStr, cur.last_notified) : [];
 
   return (
     <section>
