@@ -65,8 +65,11 @@ function makeCategory(input: CategoryInput, existing?: Category): Category {
   };
 }
 
+// 注意：'id' 必须【不在】忽略列表里 —— 新增时客户端生成的 id 要随 body 发给后端，
+// 否则本地与云端各存一条不同 id 的副本，LWW 合并会显示重复。
+// 后端 create 路由已支持「body 带 id 则用客户端 id」（见 server/src/routes/countdowns.ts/categories.ts）。
 const IGNORE_FIELDS: (keyof Countdown)[] = [
-  'id', 'created_at', 'updated_at', 'is_deleted',
+  'created_at', 'updated_at', 'is_deleted',
   'last_notified', 'notify_channel',
 ];
 
@@ -296,9 +299,10 @@ export const useStore = create<StoreState>()((set, get) => ({
     set((s) => ({
       categories: cur ? s.categories.map((x) => (x.id === c.id ? c : x)) : [...s.categories, c],
     }));
-    // 同步写后端
+    // 同步写后端：新增时把客户端生成的 c.id 一并带上，避免本地/云端各存一条
+    // （后端 createCategory 已支持 body 带 id 则用客户端 id）。
     const ok = await pushBackend(() =>
-      cur ? api.updateCategory(c.id, input) : api.createCategory(input),
+      cur ? api.updateCategory(c.id, input) : api.createCategory({ ...input, id: c.id } as CategoryInput),
     );
     if (!ok) set({ offline: true });
     return c;

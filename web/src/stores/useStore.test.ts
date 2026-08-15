@@ -130,9 +130,27 @@ describe('Bug1 修复：增删改同步写后端', () => {
     expect(apiMock.createCountdown).toHaveBeenCalledTimes(1);
     const payload = apiMock.createCountdown.mock.calls[0][0];
     expect(payload).toMatchObject({ title: '新同事入职', target_date: '2026-09-01' });
+    // Bug(重复 id)：客户端生成的 id 必须随 body 发给后端，
+    // 否则本地与云端各存一条不同 id 副本 → refresh LWW 合并显示两项。
+    expect((payload as unknown as Record<string, unknown>).id).toBe(created.id);
     // 创建成功后不应处于 offline
     expect(useStore.getState().offline).toBe(false);
     expect(created).toBeDefined();
+  });
+
+  it('新增分类 → 后端 createCategory 收到客户端生成的 id（避免本地/云端各存一条）', async () => {
+    const st = useStore.getState();
+    const created = await st.upsertCategory({ name: '工作', sort_order: 0 });
+
+    // 本地 state 立即可见
+    expect(useStore.getState().categories.some((x) => x.name === '工作')).toBe(true);
+    // 后端 createCategory 被调用写服务端
+    expect(apiMock.createCategory).toHaveBeenCalledTimes(1);
+    const payload = apiMock.createCategory.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload).toMatchObject({ name: '工作', sort_order: 0 });
+    // 关键：新增分类也要把客户端 id 传给后端
+    expect(payload.id).toBe(created.id);
+    expect(useStore.getState().offline).toBe(false);
   });
 
   it('离线时新增仍保留本地，且 offline=true（后续 merge/sync 会重传）', async () => {
