@@ -83,6 +83,15 @@ export default function HomePage() {
           ))}
         </div>
       )}
+
+      {/* 常驻 + 号浮动按钮：无论列表空否都能添加新倒计时（移动端/PC 通用） */}
+      <Link
+        to="/new"
+        aria-label="添加倒计时"
+        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-indigo-600 text-3xl font-light text-white shadow-lg active:scale-95 transition-transform"
+      >
+        ＋
+      </Link>
     </section>
   );
 }
