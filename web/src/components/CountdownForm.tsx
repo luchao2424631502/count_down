@@ -81,12 +81,14 @@ const labelCls = 'block text-sm font-medium text-gray-600 mb-1';
 export default function CountdownForm({ categories, initial, onSubmit, onCancel, submitLabel = '保存' }: Props) {
   const [f, setF] = useState<FormState>(initial ? fromCountdown(initial) : EMPTY);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setF((s) => ({ ...s, [k]: v }));
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (submitting) return; // 防连点：提交期间拒绝再次触发
     const target_date = f.target_date.trim();
     if (!f.title.trim()) return setError('请填写标题');
     if (!target_date) return setError('请选择目标日期');
@@ -101,20 +103,25 @@ export default function CountdownForm({ categories, initial, onSubmit, onCancel,
       remind_days = JSON.stringify(uniq);
     }
 
-    onSubmit({
-      title: f.title.trim(),
-      note: f.note.trim() || null,
-      target_date,
-      direction: f.direction,
-      category_id: f.category_id || null,
-      tags: cleanTags(f.tags),
-      repeat_type: f.repeat_type,
-      repeat_interval: Math.max(1, Math.floor(parseInt(f.repeat_interval || '1', 10) || 1)),
-      repeat_end: f.repeat_end || null,
-      pinned: f.pinned ? 1 : 0,
-      sort_order: Math.floor(parseInt(f.sort_order || '0', 10) || 0),
-      remind_days,
-    });
+    setSubmitting(true);
+    try {
+      await onSubmit({
+        title: f.title.trim(),
+        note: f.note.trim() || null,
+        target_date,
+        direction: f.direction,
+        category_id: f.category_id || null,
+        tags: cleanTags(f.tags),
+        repeat_type: f.repeat_type,
+        repeat_interval: Math.max(1, Math.floor(parseInt(f.repeat_interval || '1', 10) || 1)),
+        repeat_end: f.repeat_end || null,
+        pinned: f.pinned ? 1 : 0,
+        sort_order: Math.floor(parseInt(f.sort_order || '0', 10) || 0),
+        remind_days,
+      });
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -265,8 +272,12 @@ export default function CountdownForm({ categories, initial, onSubmit, onCancel,
             取消
           </button>
         )}
-        <button type="submit" className="flex-1 rounded-xl bg-indigo-600 py-3 text-base font-semibold text-white active:bg-indigo-700">
-          {submitLabel}
+        <button
+          type="submit"
+          disabled={submitting}
+          className="flex-1 rounded-xl bg-indigo-600 py-3 text-base font-semibold text-white active:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {submitting ? '保存中…' : submitLabel}
         </button>
       </div>
     </form>
